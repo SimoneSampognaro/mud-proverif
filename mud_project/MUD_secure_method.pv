@@ -1,0 +1,422 @@
+ (*
+   c: thing -> switch
+   c1: switch <-> controller
+   https: controller <-> server
+ *)
+
+free c:channel.
+free c1:channel.
+free https:channel.
+free client_finished_label: bitstring.
+free server_finished_label: bitstring.
+
+type pkey.	(* public key *)
+type skey.	(* private key *)
+type result.
+type key.
+type url.
+type certype. (* public key certificate *)
+
+(* Hash function *)
+fun hash(bitstring): bitstring.
+
+(* Public-key Encryption *)
+fun penc(bitstring, pkey): bitstring.
+fun pk(skey): pkey.
+reduc forall x:bitstring, y:skey; pdec(penc(x,pk(y)),y) = x.
+
+(* Signatures *)
+fun ok():result.
+fun sign(bitstring, skey): bitstring.
+reduc forall m:bitstring, y:skey; getmess(sign(m,y)) = m.
+reduc forall m:bitstring, y:skey; checksign(sign(m,y), pk(y)) = ok().
+
+(* Shared-key cryptography *)
+fun senc(bitstring, bitstring): bitstring.
+reduc forall x: bitstring, y: bitstring; sdec(senc(x,y),y) = x.
+
+(* URL Handling Functions *) 
+fun constructURL(bitstring, bitstring): url.  (* Constructs a URL given a hostname and a path *)
+reduc forall hostname:bitstring, path:bitstring; getHostnameFromURL(constructURL(hostname, path)) = hostname.
+
+(* Certificates for MUD server *)
+fun cert(bitstring, pkey, skey): certype [private].
+reduc forall subject:bitstring, pubkey:pkey, sk:skey; checkcert(cert(subject, pubkey, sk), pk(sk)) = ok().
+reduc forall subject:bitstring, pubkey:pkey, sk:skey, path:bitstring; checkhostname(cert(subject, pubkey, sk), constructURL(subject, path)) = ok().
+reduc forall subject:bitstring, pubkey:pkey, sk:skey; getPk(cert(subject, pubkey, sk)) = pubkey.
+reduc forall subject:bitstring, pubkey:pkey, sk:skey; getSubject(cert(subject, pubkey, sk)) = subject.
+
+(* Certificates for Things *)
+fun certDevice(bitstring, url, skey): certype [private].    (* id_pe_mudsigner, MUD url, private key CA *)
+reduc forall id_pe_mudsigner:bitstring, MUDurl:url, sk:skey; getURL(certDevice(id_pe_mudsigner, MUDurl, sk)) = MUDurl.
+reduc forall id_pe_mudsigner:bitstring, MUDurl:url, sk:skey; getIdPeMudsigner(certDevice(id_pe_mudsigner, MUDurl, sk)) = id_pe_mudsigner.
+
+(* Message Authentication Code *)
+fun HMAC(bitstring, key): bitstring.
+reduc forall x:bitstring, y:key; verifyHMAC(HMAC(x, y), x, y) = ok().
+
+(* MUD File Creation and Parsing *)
+fun makeMUDfile(url, bitstring): bitstring.
+fun configurations(bitstring): bitstring.
+reduc forall MUDurl:url, acl:bitstring; getMUDurl(makeMUDfile(MUDurl, acl)) = MUDurl.
+reduc forall MUDurl:url, acl:bitstring; getAclList(makeMUDfile(MUDurl, acl)) = acl.
+
+(* Pseudo-Random Function (Key Derivation) *)
+fun PRF(bitstring,bitstring,bitstring): key.
+
+(* Type converters *)
+fun pkey2bit(pkey): bitstring [data,typeConverter].
+fun key2bit(key): bitstring [data,typeConverter].
+fun url2bit(url): bitstring [data,typeConverter].
+
+(* ====== REACHABILITY TESTS ====== *)
+(* 
+   These events check whether a certain state has been reached 
+   in the protocol. If an 'endX' event occurs, it means that 
+   entity X has successfully completed its operation.
+*)
+
+event endManager().  (* The controller has finished processing the MUD file and has sent the configuration to the switch *)
+event endFileServer().      (* The server has successfully sent the MUD file *)
+event endThing().             (* The IoT device (Thing) has sent the MUD URL *)
+event endSwitch().      (* The switch has received and applied the configurations *)
+
+(* 
+   Queries to verify if certain completion events have been reached
+   -> result: False
+*)
+query event(endManager()).
+query event(endFileServer()).
+query event(endThing()).
+query event(endSwitch()).
+
+(* ====== MUD FILE RECEIVAL TEST ====== *)
+(* 
+   These events check whether the MUD file was correctly sent 
+   by the server and received by the manager, ensuring its integrity.
+*)
+
+event managerReceivedMUDfile(certype, bitstring).  (* The controller has received the MUD file signed with a valid certificate *)
+event serverSentMUDfile(certype, bitstring).         (* The server has sent the MUD file signed with the certificate *)
+
+(* 
+   Query: If the manager has received a MUD file signed with a valid certificate , 
+   then it must have been sent by the legitimate server (protection against MITM attacks and tampering).
+   -> result: True
+*)
+query x:certype, y:bitstring; 
+      inj-event(managerReceivedMUDfile(x,y)) ==> inj-event(serverSentMUDfile(x,y)).
+
+(* ====== SERVER AUTHENTICATION TEST ====== *)
+(* 
+   These events verify the server authentication process:
+   - The server starts authentication (serverAuthnStarted)
+   - If authentication completes successfully (serverAuthnSuccessful), 
+     then it must have been correctly initiated.
+*)
+
+event serverAuthnStarted(certype).  (* The server authentication process has started *)
+event serverAuthnSuccessful(certype).    (* The server has been successfully authenticated *)
+
+(* 
+   Authentication query: If the server completes authentication, 
+   it must have correctly started the authentication process.
+   -> result: True
+*)
+query x:certype; 
+      inj-event(serverAuthnSuccessful(x)) ==> inj-event(serverAuthnStarted(x)).
+
+(* ====== SWITCH CONFIGURATION RECEIVAL TEST ====== *)
+(* 
+   These events check whether the network configurations 
+   were successfully sent by the controller and received by the switch.
+*)
+
+event switchReceivedConfiguration(url,bitstring).     (* The switch has received the configuration *)
+event managerSentConfiguration(url,bitstring).    (* The manager has sent the configuration *)
+
+(* 
+   Query: If the switch receives a configuration, then the controller must have sent it.
+   -> result: False
+*)
+query x:url, y:bitstring; 
+      inj-event(switchReceivedConfiguration(x,y)) ==> inj-event(managerSentConfiguration(x,y)).
+
+(* ====== MUD URL RECEIVAL TEST ====== *)
+(* 
+   These events check whether the MUD URL sent by the Thing is correctly received by the manager.
+   If the manager receives a URL, it must have been sent by the Thing.
+   -> result: False
+*)
+
+event thingSentURL(url).      (* The Thing has sent the MUD URL *)
+event managerReceivedURL(url).      (* The manager has received the MUD URL *)
+
+query x:url;
+      inj-event(managerReceivedURL(x)) ==> inj-event(thingSentURL(x)).
+
+(* ====== SERVER RECEIVAL OF MUD URL TEST ====== *)
+(* 
+   These events check whether the server correctly receives a MUD URL sent by the manager.
+   If the server receives a URL, it must have been sent by the manager.
+   -> result: False (there is no client (MUD manager) authentication in the TLS handshake).
+*)
+
+event managerSentURL(url).    (* The manager has sent the MUD URL *)
+event serverReceivedURL(url).    (* The server has received the MUD URL *)
+
+query x:url;
+      inj-event(serverReceivedURL(x)) ==> inj-event(managerSentURL(x)).
+
+(* Processes *)
+
+let MUD_Manager(pkCA: pkey) =
+ 
+   (* 2. That URL is forwarded to a MUD manager by the nearest switch *)
+   in(c1, certThingX:certype);
+   event managerReceivedURL(getURL(certThingX));
+
+   (* 3. The MUD manager retrieves the MUD file and signature from the MUD
+      file server, assuming it doesn’t already have copies *)
+
+   (* RFC 8520 - Section 6
+      MUD URLs are required to use the "https" scheme, in order to establish the MUD file server’s identity 
+      and assure integrity of the MUD file.
+
+      RFC 8520 - Section 1.6
+      MUD managers that are able to do so SHOULD retrieve MUD URLs and signature files as per [RFC7230], 
+      using the GET method [RFC7231]. They MUST validate the certificate using the rules in [RFC2818], Section 3.1. 
+      
+      RFC 2818 - Section 3.1
+      In general, HTTP/TLS requests are generated by dereferencing a URI. As a consequence, the hostname for the server is known to the client.
+      If the hostname is available, the client MUST check it against the server's identity as presented in the server's Certificate message,
+      in order to prevent man-in-the-middle attacks.
+
+      If a subjectAltName extension of type dNSName is present, that MUST be used as the identity. Otherwise, the (most specific) Common Name 
+      field in the Subject field of the certificate MUST be used. Although the use of the Common Name is existing practice, it is deprecated and
+      Certification Authorities are encouraged to use the dNSName instead. *)
+
+   (* ===== Here the TLS-1.2 handshake begins ===== *)
+
+   (* TLS-1.2 Client Hello *)
+   new clientRandom: bitstring;
+   out(https, clientRandom);
+
+   in(https, (serverRandom:bitstring, certServer: certype));
+
+   (* The server’s certificate hostname must match the MUD URL hostname *)
+   if checkhostname(certServer,getURL(certThingX)) = ok() then
+
+   (* The server’s certificate must be issued by the trusted CA *) 
+   if checkcert(certServer,pkCA) = ok() then
+
+   (* TLS-1.2 Client Key Exchange *)
+   new preMasterSecret:bitstring;
+   out(https, penc(preMasterSecret, getPk(certServer)));
+
+   (* TLS-1.2 Finished *)
+   let masterSecret = PRF(preMasterSecret, clientRandom, serverRandom) in
+   let handshakeMessages = (clientRandom,serverRandom,certServer,penc(preMasterSecret, getPk(certServer))) in
+   let finishedClient = key2bit(PRF(key2bit(masterSecret), client_finished_label, hash(handshakeMessages))) in
+   out(https,finishedClient);
+
+   (* Receive the Finished Message from the server *)
+   in(https, finishedServerX:bitstring);
+
+   (* Compute the expected value of the server's Finished Message *)
+   let finishedServer = key2bit(PRF(key2bit(masterSecret), server_finished_label, hash((handshakeMessages, finishedClient)))) in
+
+   (* Compare the received Finished message with the expected one *)
+   let (=finishedServer) = finishedServerX in
+
+   event serverAuthnSuccessful(certServer);
+   (* out(https, senc(scrt, key2bit(masterSecret))); *)
+
+   (* ===== Here the MUD protocol exchange begins ===== *)
+
+   let keyMAC = PRF(key2bit(masterSecret), serverRandom, clientRandom) in
+
+   event managerSentURL(getURL(certThingX));
+   out(https,(getURL(certThingX), HMAC(url2bit(getURL(certThingX)), keyMAC)));
+
+   (* x: MUD signature file, y: certificate used for signing, z: MAC of the message *)
+   in(https, (x:bitstring, y:certype, z:bitstring));
+
+   (* Verify that the URL in the received MUD file matches the expected one from the device certificate *)
+   if(getMUDurl(getmess(x))) = getURL(certThingX) then
+
+   (* RFC 8520 - Section 13.2
+       When the id-pe-mudsigner extension is present in a device’s X.509 certificate, the MUD signature file
+      MUST have been generated by a certificate whose subject matches the contents of that id-pe-mudsigner extension.*)
+   if(getSubject(y)) = getIdPeMudsigner(certThingX) then
+
+   (* Verify the integrity and authenticity of the received message using HMAC *)
+   if verifyHMAC(z,(x,y),keyMAC) = ok() then
+
+   (* Check if the server certificate y is valid signed by the trusted CA (pkCA) *)
+   if checkcert(y,pkCA) = ok() then
+   
+   (* Verify the digital signature of the MUD file using the public key from server certificate y *)
+   if checksign(x, getPk(y))= ok() then
+
+      (* Extract the MUD file contents after successful verification *)
+      let MUDfile = getmess(x) in
+    
+   event managerReceivedMUDfile(y, MUDfile);
+
+   (* 5. The MUD manager instantiates local configuration based on the abstractions defined in this document *)
+   event managerSentConfiguration(getMUDurl(MUDfile),configurations(getAclList(MUDfile)));
+   out(c1, configurations(getAclList(MUDfile)));
+
+   event endManager(); 0. 
+
+let MUD_File_Server(certServer: certype, skServer: skey, MUDurl:url) =
+     
+   (* ===== Here the TLS-1.2 handshake begins ===== *)
+
+   in(https, clientRandom: bitstring);
+
+   event serverAuthnStarted(certServer);
+
+   (* TLS-1.2 Server Hello + Certificate *)
+   new serverRandom: bitstring;
+   out(https, (serverRandom, certServer));
+   
+   (* Receive the Client Key Exchange Message from the manager and retrieve the preMasterSecret *)
+   in(https, y:bitstring);
+   let pms = pdec(y, skServer) in
+
+   let masterSecret = PRF(pms, clientRandom, serverRandom) in
+   let handshakeMessages = (clientRandom,serverRandom,certServer,y) in
+
+   (* Receive the Finished Message from the manager *)
+   in(https, finishedClientX:bitstring);
+
+   (* Compute the expected value of the manager's Finished Message *)
+   let finishedClient = key2bit(PRF(key2bit(masterSecret), client_finished_label, hash(handshakeMessages))) in
+
+   (* Compare the received Finished message with the expected one *)
+   let (=finishedClient) = finishedClientX in
+
+   (* TLS-1.2 Finished *)
+   let finishedServer = PRF(key2bit(masterSecret), server_finished_label, hash((handshakeMessages, finishedClientX))) in
+   out(https,finishedServer);
+
+   (* ===== Here the MUD protocol exchange begins ===== *)
+
+   (* Derive a MAC key for MUD message authentication from the master secret *)
+   let keyMAC = PRF(key2bit(masterSecret), serverRandom, clientRandom) in
+
+   (* Receive the MUD URL and its associated HMAC *)
+   in(https,(=MUDurl, MAC:bitstring));
+
+   (* Verify the integrity and authenticity of the received message using HMAC *)
+   if verifyHMAC(MAC, url2bit(MUDurl), keyMAC) = ok() then
+   event serverReceivedURL(MUDurl);
+
+   (* Generate a new Access Control List and a MUD file for the device *)
+   new aclList: bitstring;
+   let MUDfile = makeMUDfile(MUDurl,aclList) in 
+
+   event serverSentMUDfile(certServer, MUDfile);
+
+   (* Send the signed MUD file, the server's certificate, and an HMAC for integrity verification *)
+   out(https, (sign(MUDfile, skServer), certServer, HMAC( (sign(MUDfile, skServer), certServer), keyMAC) ));
+
+   event endFileServer(); 0.
+
+let Thing(certThing:certype) =
+   
+   (* 1. Thing emits a URL by means of an X.509 constraint *)
+   event thingSentURL(getURL(certThing));
+   out(c, certThing);
+
+   event endThing(); 0.
+
+let Switch() =
+
+   in(c,certThing:certype);
+
+   (* 2. That URL is forwarded to a MUD manager by the nearest switch *)
+   out(c1, certThing);
+
+   (* 6. The MUD manager configures the switch nearest the Thing *)
+   in(c1,configurations:bitstring);
+
+   event switchReceivedConfiguration(getURL(certThing),configurations);
+   
+   event endSwitch(); 0.
+
+process 
+        (* Create CA public key and private key *)
+        new skCA: skey;
+        let pkCA = pk(skCA) in
+        out(c, pkCA);    (* Make it available to the attacker *)
+
+        (* Create rogue CA public key and private key *)
+        new skRogueCA: skey;
+        let pkRogueCA = pk(skRogueCA) in
+        out(c, (pkRogueCA, skRogueCA));    (* Make it available to the attacker *)
+      
+        (* Create certificates for MUD file servers *)
+        new skServer: skey;
+        new subjectServer: bitstring;
+        let pkServer = pk(skServer) in
+        let certServer = cert(subjectServer, pkServer, skCA) in
+        out(c, certServer);  (* Make it available to the attacker *)
+         
+        new skServer2: skey;
+        new subjectServer2: bitstring;
+        let pkServer2 = pk(skServer2) in
+        let certServer2 = cert(subjectServer2, pkServer2,skCA) in
+        out(c, certServer2);  (* Make it available to the attacker *)
+
+        (* RFC 8520 - Section 16
+         A rogue certification authority (CA) may sign a certificate that contains the same subject name 
+         as is listed in the MUDsigner field in the manufacturer certificate, thus seemingly 
+         permitting a substitute MUD file for a device. 
+        *)
+
+        new skServerAttacker: skey;
+        let pkServerAttacker = pk(skServerAttacker) in
+        let certAttacker = cert(subjectServer, pkServerAttacker, skRogueCA) in
+        out(c, (certAttacker, skServerAttacker));  (* Make it available to the attacker *)
+
+
+        (* Create MUD urls and certificates for Things - 802.AR manufacturer certificate (IDevID) *)
+        new path:bitstring;
+
+        let MUDurl = constructURL(subjectServer, path) in
+        let certThing = certDevice(subjectServer, MUDurl, skCA) in
+
+        let MUDurl2 = constructURL(subjectServer2, path) in
+        let certThing2 = certDevice(subjectServer2, MUDurl2, skCA) in
+
+        (* Generate a fraudulent certificate for a malicious device, signed by a rogue CA *) 
+        let certThingAttacker = certDevice(subjectServer, MUDurl, skRogueCA) in
+        out(c, certThingAttacker);
+
+        (* Create MUD file server 1 *)
+	      !(
+		      MUD_File_Server(certServer, skServer, MUDurl)
+	      )
+        (* Create MUD file server 2 *)
+	      |!(
+		      MUD_File_Server(certServer2, skServer2, MUDurl2)
+	      )
+        (* Create MUD controller that maintains a trusted CA in cache *)
+	      |!(
+		      MUD_Manager(pkCA)
+	      )
+        (* Create Thing 1 *)
+	      |!(
+		      Thing(certThing)
+	      )
+        (* Create Thing 2 *)
+	      |!(
+		      Thing(certThing2)
+	      )
+        (* Create Switch*)
+	      |!(
+		      Switch()
+	      )
